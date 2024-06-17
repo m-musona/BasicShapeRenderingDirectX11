@@ -5,15 +5,25 @@
 
 Shader::Shader(const char* vertexShaderSource, const char* pixelShaderSource, ID3D11Device* dev)
 {
-    // Create constant buffer
-    D3D11_BUFFER_DESC cbDesc;
-    ZeroMemory(&cbDesc, sizeof(cbDesc));
-    cbDesc.Usage = D3D11_USAGE_DYNAMIC;
-    cbDesc.ByteWidth = sizeof(ConstantBuffer);
-    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    // Create VS constant buffer
+    D3D11_BUFFER_DESC vsCBDesc;
+    ZeroMemory(&vsCBDesc, sizeof(vsCBDesc));
+    vsCBDesc.Usage = D3D11_USAGE_DYNAMIC;
+    vsCBDesc.ByteWidth = sizeof(VSConstantBuffer);
+    vsCBDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    vsCBDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-    dev->CreateBuffer(&cbDesc, nullptr, &mConstantBuffer);
+    dev->CreateBuffer(&vsCBDesc, nullptr, &mVSConstantBuffer);
+
+    // Create PS constant buffer
+    D3D11_BUFFER_DESC psCBDesc;
+    ZeroMemory(&psCBDesc, sizeof(psCBDesc));
+    psCBDesc.Usage = D3D11_USAGE_DYNAMIC;
+    psCBDesc.ByteWidth = sizeof(PSConstantBuffer);
+    psCBDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    psCBDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    dev->CreateBuffer(&psCBDesc, nullptr, &mPSConstantBuffer);
 
     Compile(vertexShaderSource, pixelShaderSource);
 
@@ -24,6 +34,8 @@ Shader::Shader(const char* vertexShaderSource, const char* pixelShaderSource, ID
 
 Shader::~Shader()
 {
+    mPSConstantBuffer->Release();
+    mVSConstantBuffer->Release();
 }
 
 void Shader::Compile(const char* vertexShaderSource, const char* pixelShaderSource)

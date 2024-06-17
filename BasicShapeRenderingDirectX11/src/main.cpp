@@ -1,31 +1,52 @@
-#include "Shader.h"
-#include "Buffer.h"
-#include "Texture.h"
-
+#include <iostream>
+#include <vector>
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <d3d11.h>
+#include <DirectXMath.h>
 #include <dxgi.h>
-#include <glm/glm.hpp>
-
-#include <fstream>
-
-
-#include <iostream>
+#include "Shader.h"
+#include "Buffer.h"
+#include "Texture.h"
+#include "Camera.h"
 
 // define the screen resolution
 #define SCREEN_WIDTH  800
 #define SCREEN_HEIGHT 600
 
+Camera camera = Camera((float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
+
+// timing
+float deltaTime = 0.0f;	// time between current frame and last frame
+float lastFrame = 0.0f;
+
 // GLFW Process input
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void processInput(GLFWwindow* window);
 
 static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GLFW_TRUE);
+}
+
+DirectX::XMMATRIX ConvertMat4ToXMMATRIX(const glm::mat4& mat)
+{
+    // Load the glm::mat4 data into a DirectX::XMFLOAT4X4
+    DirectX::XMFLOAT4X4 xmFloat4x4;
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int j = 0; j < 4; ++j)
+        {
+            xmFloat4x4.m[i][j] = mat[j][i]; // Transpose glm::mat4 to match XMFLOAT4X4 layout
+        }
+    }
+
+    // Load XMFLOAT4X4 into DirectX::XMMATRIX
+    return DirectX::XMLoadFloat4x4(&xmFloat4x4);
 }
 
 // Forward declarations
@@ -37,11 +58,17 @@ void InitGraphics(Shader* shader);
 IDXGISwapChain* swapchain;             // the pointer to the swap chain interface
 ID3D11Device* dev;                     // the pointer to our Direct3D device interface
 ID3D11DeviceContext* devcon;           // the pointer to our Direct3D device context
-ID3D11RenderTargetView* backbuffer;    // the  pointer to our BackBuffer
+ID3D11RenderTargetView* backbuffer;    // the pointer to our BackBuffer
 ID3D11InputLayout* pLayout;
 ID3D11SamplerState* samplerState;
 
 const char* vertexShaderSource = R"(
+cbuffer ConstantBuffer : register(b0)
+{
+    matrix model;
+    matrix view;
+    matrix projection;
+};
 struct VS_INPUT
 {
     float3 Pos : POSITION;
@@ -57,7 +84,9 @@ struct PS_INPUT
 PS_INPUT main(VS_INPUT input)
 {
     PS_INPUT output;
-    output.Pos = float4(input.Pos, 1.0f);
+    float4 worldPos = mul(float4(input.Pos, 1.0f), model);
+    float4 viewPos = mul(worldPos, view);
+    output.Pos = mul(viewPos, projection);
     output.Tex = input.Tex;
     return output;
 }
@@ -81,7 +110,8 @@ float4 main(PS_INPUT input) : SV_Target
 {
     float4 color1 = shaderTexture.Sample(SampleType, input.Tex);
     float4 color2 = shaderTexture2.Sample(SampleType, input.Tex);
-    return lerp(color1, color2, 0.5); // Blend two textures
+    //return lerp(color1, color2, 0.5) * color; // Blend two textures
+    return lerp(color1, color2, 0.5);
 }
 )";
 
@@ -99,8 +129,12 @@ int main() {
         return -1;
     }
 
-    // Get the HWND from GLFW window
+    glfwSetScrollCallback(window, scroll_callback);
 
+    // tell GLFW to capture our mouse
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    // Get the HWND from GLFW window
     HWND hwnd = glfwGetWin32Window(window);
 
     // Initialize DirectX
@@ -122,7 +156,7 @@ int main() {
     VertexBuffer* vertexBuffer = new VertexBuffer(vertices, dev);
 
     std::vector<unsigned int> indices = {
-        0, 1, 2, 
+        0, 1, 2,
         2, 3, 0
     };
 
@@ -147,9 +181,13 @@ int main() {
     if (FAILED(hr)) {
         throw std::runtime_error("Failed to create sampler state");
     }
-    
 
     while (!glfwWindowShouldClose(window)) {
+
+        float currentFrame = static_cast<float>(glfwGetTime());
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
         // input
         // -----
         processInput(window);
@@ -162,16 +200,37 @@ int main() {
         // clear the back buffer to a deep blue
         devcon->ClearRenderTargetView(backbuffer, clearColor);
 
-        float time = static_cast<float>(glfwGetTime());
+        float redValue = sin(currentFrame) / 2.0f + 0.5f;
 
         // Update constant buffer with current time
-        D3D11_MAPPED_SUBRESOURCE mappedResource;
-        devcon->Map(shader->GetConstantBuffer(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
-        Shader::ConstantBuffer* cb = (Shader::ConstantBuffer*)mappedResource.pData;
-        float timeValue = glfwGetTime();
-        float redValue = sin(timeValue) / 2.0f + 0.5f;
-        cb->color = { redValue, 0.0f, 0.0f, 1.0f };
-        devcon->Unmap(shader->GetConstantBuffer(), 0);
+        D3D11_MAPPED_SUBRESOURCE psMappedResource, vsMappedResource;
+
+        // Vertex Shader
+        devcon->Map(shader->GetVSConstantBuffer(), 0, D3D11_MAP_WRITE_DISCARD, 0, &vsMappedResource);
+
+        Shader::VSConstantBuffer* vsCb = (Shader::VSConstantBuffer*)vsMappedResource.pData;
+
+       // vsCb->projection = camera.GetCameraProjection();
+        DirectX::XMMATRIX dxMatrix = ConvertMat4ToXMMATRIX(camera.GetCameraProjection());
+        vsCb->projection = dxMatrix;
+        dxMatrix = ConvertMat4ToXMMATRIX(camera.GetCameraView());
+        //vsCb->view = camera.GetCameraView();
+        vsCb->view = dxMatrix;
+
+        glm::mat4 model = glm::mat4(1.0f);
+        model = glm::translate(model, glm::vec3(0.0f, 0.0f, 0.0f));
+        model = glm::rotate(model, glm::radians(0.0f), glm::vec3(1.0f, 0.3f, 0.5f));
+
+        dxMatrix = ConvertMat4ToXMMATRIX(model);
+        vsCb->model = dxMatrix;
+
+        devcon->Unmap(shader->GetVSConstantBuffer(), 0);
+
+        // Pixel Shader
+        devcon->Map(shader->GetPSConstantBuffer(), 0, D3D11_MAP_WRITE_DISCARD, 0, &psMappedResource);
+        Shader::PSConstantBuffer* psCb = (Shader::PSConstantBuffer*)psMappedResource.pData;
+        psCb->color = { redValue, 0.0f, 0.0f, 1.0f };
+        devcon->Unmap(shader->GetPSConstantBuffer(), 0);
 
         // do 3D rendering on the back buffer here
         // Set vertex buffer
@@ -195,9 +254,13 @@ int main() {
 
         devcon->PSSetSamplers(0, 1, &samplerState);
 
-        // Set constant buffer
-        ID3D11Buffer* pCBuffer = shader->GetConstantBuffer();
-        devcon->PSSetConstantBuffers(0, 1, &pCBuffer);
+        // Set VS constant buffer
+        ID3D11Buffer* vsCBuffer = shader->GetVSConstantBuffer();
+        devcon->VSSetConstantBuffers(0, 1, &vsCBuffer);
+
+        // Set PS constant buffer
+        ID3D11Buffer* psCBuffer = shader->GetPSConstantBuffer();
+        devcon->PSSetConstantBuffers(0, 1, &psCBuffer);
 
         devcon->DrawIndexed(indexBuffer->GetIndicesSize(), 0, 0);
 
@@ -217,8 +280,7 @@ int main() {
 }
 
 // this function initializes and prepares Direct3D for use
-void InitD3D(HWND hWnd)
-{
+void InitD3D(HWND hWnd) {
     // create a struct to hold information about the swap chain
     DXGI_SWAP_CHAIN_DESC scd;
 
@@ -238,12 +300,17 @@ void InitD3D(HWND hWnd)
     scd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;     // allow full-screen switching
 
     // create a device, device context and swap chain using the information in the scd struct
+    UINT createDeviceFlags = 0;
+#if defined(DEBUG) || defined(_DEBUG)
+    createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
     HRESULT hr = D3D11CreateDeviceAndSwapChain(NULL,
         D3D_DRIVER_TYPE_HARDWARE,
         NULL,
+        createDeviceFlags,
         NULL,
-        NULL,
-        NULL,
+        0,
         D3D11_SDK_VERSION,
         &scd,
         &swapchain,
@@ -252,8 +319,25 @@ void InitD3D(HWND hWnd)
         &devcon);
 
     if (FAILED(hr)) {
-        std::cerr << "Failed to create DirectX device and swap chain" << std::endl;
-        exit(-1);
+        // If device creation failed with debug flag, retry without it
+        createDeviceFlags &= ~D3D11_CREATE_DEVICE_DEBUG;
+        hr = D3D11CreateDeviceAndSwapChain(NULL,
+            D3D_DRIVER_TYPE_HARDWARE,
+            NULL,
+            createDeviceFlags,
+            NULL,
+            0,
+            D3D11_SDK_VERSION,
+            &scd,
+            &swapchain,
+            &dev,
+            NULL,
+            &devcon);
+
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create DirectX device and swap chain" << std::endl;
+            exit(-1);
+        }
     }
 
     // get the address of the back buffer
@@ -261,7 +345,11 @@ void InitD3D(HWND hWnd)
     swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
 
     // use the back buffer address to create the render target
-    dev->CreateRenderTargetView(pBackBuffer, NULL, &backbuffer);
+    hr = dev->CreateRenderTargetView(pBackBuffer, NULL, &backbuffer);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create render target view" << std::endl;
+        exit(-1);
+    }
     pBackBuffer->Release();
 
     // set the render target as the back buffer
@@ -281,14 +369,17 @@ void InitD3D(HWND hWnd)
 
 void InitGraphics(Shader* shader)
 {
-
     // Define the input layout
     D3D11_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, sizeof(float) * 3, D3D11_INPUT_PER_VERTEX_DATA, 0}
     };
 
-    dev->CreateInputLayout(layout, ARRAYSIZE(layout), shader->GetVSBlob()->GetBufferPointer(), shader->GetVSBlob()->GetBufferSize(), &pLayout);
+    HRESULT hr = dev->CreateInputLayout(layout, ARRAYSIZE(layout), shader->GetVSBlob()->GetBufferPointer(), shader->GetVSBlob()->GetBufferSize(), &pLayout);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create input layout" << std::endl;
+        exit(-1);
+    }
 
     // Set the input layout
     devcon->IASetInputLayout(pLayout);
@@ -316,4 +407,17 @@ void processInput(GLFWwindow* window)
 {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
+
+    double xpos, ypos;
+    glfwGetCursorPos(window, &xpos, &ypos);
+    camera.MouseCallback(xpos, ypos);
+
+    camera.processInput(window, deltaTime);
+}
+
+// glfw: whenever the mouse scroll wheel scrolls, this callback is called
+// ----------------------------------------------------------------------
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    camera.ScrollCallback(xoffset, yoffset);
 }
